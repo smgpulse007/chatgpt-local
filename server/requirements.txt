@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+httpx
+pydantic
+pydantic-settings
+ddgs
+readability-lxml
+lxml
+trafilatura
+beautifulsoup4
+python-dotenv
+chromadb
+sentence-transformers
+websockets
+aiosqlite
+mcp
