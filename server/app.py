@@ -12,6 +12,7 @@ import os
 
 from agents.settings import settings
 from agents.schemas import ChatRequest, ChatResponse, ModelInfo, HealthResponse
+from agents.manager import AgentManager
 from agents.core import Agent
 from agents.memory import ConversationManager
 from agents.util import create_sse_data
@@ -37,7 +38,7 @@ app.add_middleware(
 )
 
 # Initialize components
-agent = Agent()
+agent_manager = AgentManager()
 conversation_manager = ConversationManager()
 
 @app.on_event("startup")
@@ -65,6 +66,24 @@ async def health_check():
         model_id=settings.model_id
     )
 
+@app.post("/agents")
+async def create_agent():
+    """Create a new agent instance"""
+    agent_id = agent_manager.create_agent()
+    return {"agent_id": agent_id}
+
+@app.get("/agents")
+async def list_agents_endpoint():
+    """List active agent IDs"""
+    return {"agents": agent_manager.list_agents()}
+
+@app.delete("/agents/{agent_id}")
+async def delete_agent(agent_id: str):
+    """Remove an agent instance"""
+    removed = await agent_manager.remove_agent(agent_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return {"message": "Agent removed"}
 @app.get("/models", response_model=list[ModelInfo])
 async def list_models():
     """List available Ollama models"""
@@ -92,6 +111,12 @@ async def list_models():
 async def chat_endpoint(request: ChatRequest):
     """Main chat endpoint with streaming response"""
     try:
+        if not request.agent_id:
+            raise HTTPException(status_code=400, detail="agent_id required")
+        agent = agent_manager.get_agent(request.agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
         # Validate conversation exists or create new one
         if request.conversation_id:
             conversation = await conversation_manager.get_conversation(request.conversation_id)
@@ -116,7 +141,7 @@ async def chat_endpoint(request: ChatRequest):
 
         # Generate streaming response
         return StreamingResponse(
-            stream_chat_response(request),
+            stream_chat_response(request, agent),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -124,11 +149,13 @@ async def chat_endpoint(request: ChatRequest):
                 "Access-Control-Allow-Origin": "*",
             }
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-async def stream_chat_response(request: ChatRequest) -> AsyncGenerator[str, None]:
+async def stream_chat_response(request: ChatRequest, agent: Agent) -> AsyncGenerator[str, None]:
     """Stream chat response using Server-Sent Events"""
     try:
         # Run agent with streaming
@@ -181,7 +208,21 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 request_data = json.loads(data)
                 request = ChatRequest(**request_data)
-                
+
+                if not request.agent_id:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "content": "agent_id required"
+                    }))
+                    continue
+                agent = agent_manager.get_agent(request.agent_id)
+                if not agent:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "content": "Agent not found"
+                    }))
+                    continue
+
                 # Process with agent
                 async for chunk in agent.run_streaming(
                     messages=request.messages,

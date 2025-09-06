@@ -11,6 +11,7 @@ class Message(BaseModel):
 class ChatRequest(BaseModel):
     messages: List[Message]
     conversation_id: Optional[str] = None
+    agent_id: str
     enable_browsing: bool = False
     system: Optional[str] = None
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
