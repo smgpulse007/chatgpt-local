@@ -9,8 +9,8 @@ by connecting to them and registering their tools in our tool registry.
 import asyncio
 import json
 import logging
-import subprocess
 import sys
+import shlex
 from typing import Any, Dict, List, Optional
 from agents.settings import settings
 
@@ -20,38 +20,100 @@ class MCPClient:
     """Client for connecting to external MCP servers"""
     
     def __init__(self):
-        self.connected_servers = {}
-        self.external_tools = {}
+        self.connected_servers: Dict[str, Dict[str, Any]] = {}
+        self.external_tools: Dict[str, Dict[str, Any]] = {}
         
     async def connect_to_server(self, server_config: Dict[str, str]) -> bool:
         """Connect to an external MCP server"""
         try:
             name = server_config.get("name")
             command = server_config.get("command")
-            
-            if not name or not command:
+            host = server_config.get("host")
+            port = server_config.get("port")
+
+            if not name:
                 logger.error(f"Invalid server config: {server_config}")
                 return False
-            
-            # For now, we'll create a simple registry
-            # In a full implementation, this would establish actual connections
-            self.connected_servers[name] = server_config
-            logger.info(f"Registered MCP server: {name}")
-            
-            # Get tools from this server (simplified)
-            tools = await self._get_server_tools(name, command)
-            self.external_tools.update(tools)
-            
+
+            reader: Optional[asyncio.StreamReader] = None
+            writer: Optional[asyncio.StreamWriter] = None
+            process: Optional[asyncio.subprocess.Process] = None
+
+            if command:
+                process = await asyncio.create_subprocess_exec(
+                    *shlex.split(command),
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                )
+                reader = process.stdout
+                writer = process.stdin
+            elif host and port:
+                reader, writer = await asyncio.open_connection(host, int(port))
+            else:
+                logger.error(f"Invalid server config: {server_config}")
+                return False
+
+            self.connected_servers[name] = {
+                "process": process,
+                "reader": reader,
+                "writer": writer,
+            }
+            logger.info(f"Connected to MCP server: {name}")
+
+            tools = await self._get_server_tools(name)
+            self.external_tools[name] = tools
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to connect to MCP server {server_config}: {e}")
             return False
     
-    async def _get_server_tools(self, server_name: str, command: str) -> Dict[str, Dict]:
+    async def _get_server_tools(self, server_name: str) -> Dict[str, Dict]:
         """Get available tools from an MCP server"""
-        # Simplified implementation - in practice this would use the MCP protocol
-        return {}
+        try:
+            server = self.connected_servers.get(server_name)
+            if not server:
+                return {}
+
+            reader: asyncio.StreamReader = server["reader"]
+            writer: asyncio.StreamWriter = server["writer"]
+
+            request = {"method": "tools/list"}
+            writer.write(json.dumps(request).encode() + b"\n")
+            await writer.drain()
+
+            line = await reader.readline()
+            if not line:
+                return {}
+
+            response = json.loads(line.decode())
+            tools_info = response.get("tools", [])
+            tools: Dict[str, Dict[str, Any]] = {}
+
+            for tool in tools_info:
+                if "function" in tool:
+                    fn = tool["function"]
+                    tools[fn["name"]] = tool
+                else:
+                    name = tool.get("name")
+                    tools[name] = {
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": tool.get("description", ""),
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                            },
+                        },
+                    }
+
+            return tools
+
+        except Exception as e:
+            logger.error(f"Failed to get tools from {server_name}: {e}")
+            return {}
     
     async def call_external_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Call a tool on an external MCP server"""
@@ -66,13 +128,56 @@ class MCPClient:
             if not server_name:
                 return {"error": f"Tool {tool_name} not found in any connected server"}
             
-            # In a full implementation, this would make the actual MCP call
-            logger.info(f"Would call {tool_name} on server {server_name} with {arguments}")
-            return {"result": f"External tool {tool_name} called successfully"}
+            server = self.connected_servers.get(server_name)
+            if not server:
+                return {"error": f"Server {server_name} not connected"}
+
+            reader: asyncio.StreamReader = server["reader"]
+            writer: asyncio.StreamWriter = server["writer"]
+
+            request = {
+                "method": "tools/call",
+                "params": {
+                    "name": tool_name,
+                    "arguments": arguments,
+                },
+            }
+
+            writer.write(json.dumps(request).encode() + b"\n")
+            await writer.drain()
+
+            line = await reader.readline()
+            if not line:
+                return {"error": "No response from server"}
+
+            response = json.loads(line.decode())
+            return response
             
         except Exception as e:
             logger.error(f"External tool call failed for {tool_name}: {e}")
             return {"error": str(e)}
+
+    async def disconnect_server(self, server_name: str) -> None:
+        """Disconnect from a specific MCP server"""
+        server = self.connected_servers.pop(server_name, None)
+        if not server:
+            return
+
+        writer: Optional[asyncio.StreamWriter] = server.get("writer")
+        if writer:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+        process: Optional[asyncio.subprocess.Process] = server.get("process")
+        if process:
+            process.terminate()
+            try:
+                await process.wait()
+            except ProcessLookupError:
+                pass
     
     def get_available_external_tools(self) -> List[str]:
         """Get list of all available external tools"""
