@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: realtime-avatar/docker/Dockerfile.server
+    image: realtime-avatar-server:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+    volumes:
+      - ../assets:/app/assets:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    runtime: nvidia
+
+  client:
+    build:
+      context: ..
+      dockerfile: realtime-avatar/docker/Dockerfile.client
+    image: realtime-avatar-client:latest
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_SERVER_URL=http://localhost:8000
+    depends_on:
+      - server
