@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+aiortc==1.9.0
+av
+numpy
+pydantic
+pynacl
+torch --extra-index-url https://download.pytorch.org/whl/cu124
+torchaudio --extra-index-url https://download.pytorch.org/whl/cu124
+faster-whisper
+silero
+coqpit
+TTS==0.22.0
+soundfile
+scipy
+httpx
